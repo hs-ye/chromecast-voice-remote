@@ -12,6 +12,8 @@ BASE_COMMIT="0e8f641"
 
 # Defaults; voice-remote.env overrides them, then command-line flags do.
 MAC=""
+SOURCE_URL="$UPSTREAM"
+SOURCE_REF=""
 PREFIX="$HOME/.local"
 DO_HWDB=1
 DO_HANDY=1
@@ -46,6 +48,8 @@ Usage: ./install.sh [options]
 
   --mac AA:BB:CC:DD:EE:FF  Remote address (default: auto-detect)
   --prefix DIR             Install prefix (default: ~/.local)
+  --source URL|PATH        Clone from this source instead of GitHub
+  --ref REF                Build this git ref and skip patches/ (e.g. a tag)
   --no-hwdb                Do not install the udev button remap
   --no-handy               Do not touch Handy's settings
   --set-default            Make the virtual mic the system default input
@@ -66,6 +70,14 @@ while (($#)); do
             ;;
         --prefix)
             PREFIX=${2:?--prefix needs a directory}
+            shift 2
+            ;;
+        --source)
+            SOURCE_URL=${2:?--source needs a URL or path}
+            shift 2
+            ;;
+        --ref)
+            SOURCE_REF=${2:?--ref needs a git ref}
             shift 2
             ;;
         --no-hwdb)
@@ -147,22 +159,28 @@ EOF
 fi
 
 # --- build ----------------------------------------------------------------
-PATCHES=("$REPO_DIR"/patches/*.patch)
-[[ -e "${PATCHES[0]}" ]] || die "no patches found in $REPO_DIR/patches"
-say "building atvvoice $BASE_COMMIT with ${#PATCHES[@]} patches"
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
-run git clone --quiet "$UPSTREAM" "$WORK/atvvoice"
-run git -C "$WORK/atvvoice" checkout --quiet "$BASE_COMMIT"
-for p in "${PATCHES[@]}"; do
-    run git -C "$WORK/atvvoice" apply "$p"
-done
+if [[ -n "$SOURCE_REF" ]]; then
+    say "building $SOURCE_URL at $SOURCE_REF (patches skipped)"
+    run git clone --quiet "$SOURCE_URL" "$WORK/atvvoice"
+    run git -C "$WORK/atvvoice" checkout --quiet "$SOURCE_REF"
+else
+    PATCHES=("$REPO_DIR"/patches/*.patch)
+    [[ -e "${PATCHES[0]}" ]] || die "no patches found in $REPO_DIR/patches"
+    say "building atvvoice $BASE_COMMIT with ${#PATCHES[@]} patches"
+    run git clone --quiet "$UPSTREAM" "$WORK/atvvoice"
+    run git -C "$WORK/atvvoice" checkout --quiet "$BASE_COMMIT"
+    for p in "${PATCHES[@]}"; do
+        run git -C "$WORK/atvvoice" apply "$p"
+    done
+fi
 run cargo build --release --manifest-path "$WORK/atvvoice/Cargo.toml"
 
 # --- install binaries -----------------------------------------------------
 say "installing binaries to $PREFIX/bin"
 run install -Dm755 "$WORK/atvvoice/target/release/atvvoice" "$PREFIX/bin/atvvoice"
-run install -Dm755 "$WORK/atvvoice/contrib/handy-remote-trigger" "$PREFIX/bin/handy-remote-trigger"
+run install -Dm755 "$REPO_DIR/files/handy-remote-trigger" "$PREFIX/bin/handy-remote-trigger"
 
 # --- systemd user unit ----------------------------------------------------
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"

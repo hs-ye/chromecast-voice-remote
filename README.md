@@ -68,6 +68,14 @@ Useful flags:
 
 You can also copy `voice-remote.env.example` to `voice-remote.env` and edit it.
 
+To build from a git ref instead of the patch series:
+
+```bash
+./install.sh --source ~/GitRepos/atvvoice --ref upstream/remaining
+```
+
+`--ref` skips `patches/`; see **Upstream staging** below.
+
 ### 3. Install Handy
 
 Install Handy from <https://handy.computer>, open it once, and download the
@@ -134,9 +142,31 @@ dead. The hwdb remaps them by scancode, below X:
 Edit `files/90-chromecast-remote.hwdb` and re-run the udev trigger to change them. `hwdb`
 maps one keycode to one keycode — no combos.
 
+## Upstream staging
+
+The remaining atvvoice changes are staged on the `upstream/remaining` branch in the
+atvvoice checkout. `upstream/README.md` maps each commit to the issue or PR it belongs
+to, and `upstream/patches/` is the clean series.
+
+That branch **excludes** the fixes already covered by upstream **PR #27** (BLE write-op
+and HoldToTalk) and **issue #28** (name sanitizer), so it is not a working Chromecast
+install on its own. It is meant to be rebased onto upstream `main` after those merge.
+Until then, the default `patches/` series is the full working set.
+
+After the upstream changes land in a release:
+
+- delete `patches/`
+- install from the official tag or a distro package (`--ref vX.Y.Z`, or the package
+  manager)
+- add `--backend sink` to the unit if the sink backend lands opt-in
+- keep `files/` — the hwdb, unit, wrapper and Handy settings are still needed
+
 ## Why the patches
 
-Upstream `b0o/atvvoice` at `0e8f641` is the base. `patches/` contains ten commits:
+Upstream `b0o/atvvoice` at `0e8f641` is the base. `patches/` is the transitional full
+series — it includes fixes now covered by upstream PR #27 and issue #28 so the package
+works today. `upstream/patches/` is the clean remaining series for after those merge.
+The full series has ten commits:
 
 1. **BLE write fallback** — the ATVV TX characteristic is write-without-response only;
    BlueZ rejects a Write Request with `NotPermitted`.
@@ -189,8 +219,12 @@ files/
   90-chromecast-remote.hwdb  button remap
   atvvoice.service.in        templated user unit
   handy-settings.json        settings merged into Handy
+  handy-remote-trigger       idempotent Handy start/stop wrapper
 patches/
-  0001..0010                 atvvoice changes, pinned to 0e8f641
+  0001..0010                 transitional full series, pinned to 0e8f641
+upstream/
+  README.md                  issue/PR layout and rebase order
+  patches/                   clean remaining series (post-PR #27 / issue #28)
 ```
 
 ## Credits

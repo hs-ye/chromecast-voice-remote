@@ -1,0 +1,61 @@
+From e1106c3ca5f76335db6f65a4b4911117cfbf34a5 Mon Sep 17 00:00:00 2001
+From: hs-ye <ye.hansang@gmail.com>
+Date: Mon, 19 Oct 2026 10:31:27 +1100
+Subject: [PATCH 5/6] Allow a capped 150 ms lead when feeding the sink
+
+Pacing strictly to the clock meant a brief gap between BLE frames could be
+filled with silence inside a word. Allowing a small lead keeps pw-cat's buffer
+fed through that jitter while still bounding the backlog, so the tail cannot
+queue up the way it did before.
+
+(cherry picked from commit 56d149f4a0ea772525621feb1753aeddbc453e7a)
+---
+ src/pw.rs | 21 ++++++++++++---------
+ 1 file changed, 12 insertions(+), 9 deletions(-)
+
+diff --git a/src/pw.rs b/src/pw.rs
+index 3e0b7d3..043eac1 100644
+--- a/src/pw.rs
++++ b/src/pw.rs
+@@ -168,19 +168,22 @@ fn write_pcm_to_sink(
+ 
+     let started = std::time::Instant::now();
+     let mut written_samples: u64 = 0;
++    // Allow a small, capped lead over the clock. It keeps pw-cat's buffer fed
++    // through brief gaps between BLE frames — so silence is never spliced into
++    // the middle of a word — while the cap stops the backlog growing the way
++    // the old unconditional silence ticks did.
++    let lead_samples = (sample_rate as u64 / 1000) * 150;
+ 
+     loop {
+         if stop.load(Ordering::Relaxed) {
+             break;
+         }
+ 
+-        // Pace to the wall clock. Writing faster than real time — which the old
+-        // unconditional silence ticks did whenever the frame queue happened to
+-        // be empty — makes pw-cat queue audio, so the backlog grows through an
+-        // utterance and the tail is still in flight when the consumer is told
+-        // to stop. Never write ahead of the clock.
++        // Pace to the wall clock. Writing further ahead than the lead makes
++        // pw-cat queue audio, so the lag grows through an utterance and the
++        // tail is still in flight when the consumer is told to stop.
+         let due = (started.elapsed().as_secs_f64() * sample_rate as f64) as u64;
+-        if written_samples > due {
++        if written_samples > due + lead_samples {
+             std::thread::sleep(Duration::from_millis(5));
+             continue;
+         }
+@@ -199,9 +202,9 @@ fn write_pcm_to_sink(
+                 written_samples += (bytes.len() / 2) as u64;
+             }
+             Err(mpsc::RecvTimeoutError::Timeout) => {
+-                // Nothing pending: fill the gap up to the clock so the sink
+-                // stays fed, but never beyond it.
+-                let mut deficit = (due - written_samples) as usize;
++                // Nothing pending and we have fallen behind the clock: fill the
++                // gap with silence so the sink stays fed.
++                let mut deficit = due.saturating_sub(written_samples) as usize;
+                 let chunk = silence.len() / 2;
+                 while deficit > 0 {
+                     let take = deficit.min(chunk);

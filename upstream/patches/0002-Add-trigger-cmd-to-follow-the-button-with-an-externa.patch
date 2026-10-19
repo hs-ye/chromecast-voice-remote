@@ -1,0 +1,191 @@
+From 055803dbb9a46ec55e8cb347e4df229c15f58a6f Mon Sep 17 00:00:00 2001
+From: hs-ye <ye.hansang@gmail.com>
+Date: Sun, 18 Oct 2026 18:09:02 +1100
+Subject: [PATCH 2/6] Add --trigger-cmd to follow the button with an external
+ dictation tool
+
+Fires on every transition into and out of Streaming, so a press starts the
+tool and a release (or a frame timeout, or a transport error) stops it. Used
+as: --trigger-cmd 'handy --toggle-transcription', which replaces the need to
+press Handy's keyboard shortcut while holding the remote.
+
+(cherry picked from commit 67602c097960c86c2db9594440c597e56c040ac1)
+---
+ src/atvv.rs | 46 ++++++++++++++++++++++++++++++++++++++++++++++
+ src/main.rs |  7 +++++++
+ 2 files changed, 53 insertions(+)
+
+diff --git a/src/atvv.rs b/src/atvv.rs
+index 18a78ab..40757d2 100644
+--- a/src/atvv.rs
++++ b/src/atvv.rs
+@@ -94,6 +94,33 @@ pub struct SessionConfig<'a> {
+     pub state_tx: Option<&'a tokio::sync::watch::Sender<State>>,
+     pub consumer_rx: Option<tokio::sync::mpsc::Receiver<consumer::ConsumerEvent>>,
+     pub mic_on_demand: bool,
++    /// Shell command run when streaming starts and again when it stops.
++    ///
++    /// Lets an external dictation tool follow the remote's button, e.g.
++    /// `handy --toggle-transcription`.
++    pub trigger_cmd: Option<&'a str>,
++}
++
++/// Run the configured trigger command, if any.
++fn fire_trigger(cmd: Option<&str>) {
++    let Some(cmd) = cmd else { return };
++    tracing::debug!("trigger: {cmd}");
++    match std::process::Command::new("sh")
++        .arg("-c")
++        .arg(cmd)
++        .stdin(std::process::Stdio::null())
++        .stdout(std::process::Stdio::null())
++        .stderr(std::process::Stdio::null())
++        .spawn()
++    {
++        // Reap on a helper thread so repeated presses cannot pile up zombies.
++        Ok(mut child) => {
++            std::thread::spawn(move || {
++                let _ = child.wait();
++            });
++        }
++        Err(e) => tracing::warn!("trigger command failed to start: {e}"),
++    }
+ }
+ 
+ /// Run the ATVV protocol session.
+@@ -121,6 +148,7 @@ pub async fn run_session(
+         state_tx,
+         mut consumer_rx,
+         mic_on_demand,
++        trigger_cmd,
+     } = config;
+     let mut state = State::Connected;
+ 
+@@ -128,7 +156,14 @@ pub async fn run_session(
+     // `state` is used independently in the tokio::select! branches below. Capturing
+     // it mutably would prevent its use in match guards and conditions.
+     let set_state = |s: State, state: &mut State| {
++        let previous = *state;
+         *state = s;
++        // Keep the external trigger paired with streaming: fire on the way in
++        // and on every way out (release, frame timeout, transport error) so a
++        // dictation tool is never left recording.
++        if (previous == State::Streaming) != (s == State::Streaming) {
++            fire_trigger(trigger_cmd);
++        }
+         if let Some(tx) = state_tx {
+             if tx.send(s).is_err() {
+                 tracing::debug!("state_tx: no receivers");
+@@ -591,6 +626,7 @@ mod tests {
+                     state_tx: Some(&state_tx),
+                     consumer_rx: None,
+                     mic_on_demand: false,
++                    trigger_cmd: None,
+                 },
+             )
+             .await
+@@ -695,6 +731,7 @@ mod tests {
+                     state_tx: Some(&state_tx),
+                     consumer_rx: None,
+                     mic_on_demand: false,
++                    trigger_cmd: None,
+                 },
+             )
+             .await
+@@ -780,6 +817,7 @@ mod tests {
+                     state_tx: Some(&state_tx),
+                     consumer_rx: None,
+                     mic_on_demand: false,
++                    trigger_cmd: None,
+                 },
+             )
+             .await
+@@ -842,6 +880,7 @@ mod tests {
+                     state_tx: Some(&state_tx),
+                     consumer_rx: None,
+                     mic_on_demand: false,
++                    trigger_cmd: None,
+                 },
+             )
+             .await
+@@ -941,6 +980,7 @@ mod tests {
+                     state_tx: Some(&state_tx),
+                     consumer_rx: Some(consumer_rx),
+                     mic_on_demand: true,
++                    trigger_cmd: None,
+                 },
+             )
+             .await
+@@ -1010,6 +1050,7 @@ mod tests {
+                     state_tx: Some(&state_tx),
+                     consumer_rx: Some(consumer_rx),
+                     mic_on_demand: true,
++                    trigger_cmd: None,
+                 },
+             )
+             .await
+@@ -1094,6 +1135,7 @@ mod tests {
+                     state_tx: Some(&state_tx),
+                     consumer_rx: Some(consumer_rx),
+                     mic_on_demand: false, // disabled
++                    trigger_cmd: None,
+                 },
+             )
+             .await
+@@ -1167,6 +1209,7 @@ mod tests {
+                     state_tx: Some(&state_tx),
+                     consumer_rx: Some(consumer_rx),
+                     mic_on_demand: true,
++                    trigger_cmd: None,
+                 },
+             )
+             .await
+@@ -1252,6 +1295,7 @@ mod tests {
+                     state_tx: Some(&state_tx),
+                     consumer_rx: Some(consumer_rx),
+                     mic_on_demand: true,
++                    trigger_cmd: None,
+                 },
+             )
+             .await
+@@ -1332,6 +1376,7 @@ mod tests {
+                     state_tx: Some(&state_tx),
+                     consumer_rx: Some(consumer_rx),
+                     mic_on_demand: true,
++                    trigger_cmd: None,
+                 },
+             )
+             .await
+@@ -1422,6 +1467,7 @@ mod tests {
+                     state_tx: Some(&state_tx),
+                     consumer_rx: None,
+                     mic_on_demand: false,
++                    trigger_cmd: None,
+                 },
+             )
+             .await
+diff --git a/src/main.rs b/src/main.rs
+index 92546a0..8035d97 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -65,6 +65,12 @@ struct Cli {
+     #[arg(long)]
+     mic_on_demand: bool,
+ 
++    /// Shell command to run when the button starts streaming and again when it
++    /// stops, e.g. "handy --toggle-transcription". Lets a dictation tool follow
++    /// the remote's voice button without a keyboard shortcut.
++    #[arg(long)]
++    trigger_cmd: Option<String>,
++
+     /// Increase log verbosity (-v, -vv, -vvv)
+     #[arg(short, long, action = clap::ArgAction::Count)]
+     verbose: u8,
+@@ -459,6 +465,7 @@ async fn main() -> anyhow::Result<()> {
+                         state_tx: Some(&state_tx),
+                         consumer_rx,
+                         mic_on_demand: cli.mic_on_demand,
++                        trigger_cmd: cli.trigger_cmd.as_deref(),
+                     },
+                 ) => result,
+                 _ = tokio::signal::ctrl_c() => {

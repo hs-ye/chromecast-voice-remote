@@ -1,0 +1,159 @@
+From 793f85e6a7f16165ce7914d62532c39854da456e Mon Sep 17 00:00:00 2001
+From: hs-ye <ye.hansang@gmail.com>
+Date: Mon, 19 Oct 2026 10:30:51 +1100
+Subject: [PATCH 4/6] Stop stretching audio and hold the trigger's stop briefly
+
+Two sources of tail loss, both measured against a reference capture of the
+same microphone:
+
+- the writer emitted 20 ms of silence whenever the frame queue happened to be
+  empty, writing faster than real time. A 10.74 s press produced 11.95 s of
+  audio, so the backlog grew through the utterance and ~1.5 s was still in
+  pw-cat when the consumer was told to stop. Pace to the wall clock and only
+  fill silence up to it.
+- the stop trigger fired at the instant of release, before buffered audio
+  arrived. Delay it 300 ms, with a generation counter so a newer press
+  supersedes a pending stop.
+
+(cherry picked from commit fd2fefa45830960f6ab51fb4adb0e65bf80b77a0)
+---
+ src/atvv.rs | 54 ++++++++++++++++++++++++++++++++++++-----------------
+ src/pw.rs   | 34 +++++++++++++++++++++++++++++----
+ 2 files changed, 67 insertions(+), 21 deletions(-)
+
+diff --git a/src/atvv.rs b/src/atvv.rs
+index ae865f1..1e00a58 100644
+--- a/src/atvv.rs
++++ b/src/atvv.rs
+@@ -101,26 +101,43 @@ pub struct SessionConfig<'a> {
+     pub trigger_cmd: Option<&'a str>,
+ }
+ 
++/// Wait this long before telling the trigger command to stop, so audio still
++/// inside the PipeWire buffers reaches the consumer first.
++const TRIGGER_STOP_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
++
++/// Bumped on every trigger so a pending stop can tell it has been superseded.
++static TRIGGER_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++
+ /// Run the configured trigger command, if any.
+-fn fire_trigger(cmd: Option<&str>) {
++fn fire_trigger(cmd: Option<&str>, delay: Option<std::time::Duration>) {
+     let Some(cmd) = cmd else { return };
+-    tracing::info!("trigger: {cmd}");
+-    match std::process::Command::new("sh")
+-        .arg("-c")
+-        .arg(cmd)
+-        .stdin(std::process::Stdio::null())
+-        .stdout(std::process::Stdio::null())
+-        .stderr(std::process::Stdio::null())
+-        .spawn()
+-    {
+-        // Reap on a helper thread so repeated presses cannot pile up zombies.
+-        Ok(mut child) => {
+-            std::thread::spawn(move || {
++    let cmd = cmd.to_owned();
++    let generation = TRIGGER_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
++    // On a helper thread: a delayed stop must not block the session loop, and
++    // the child still needs reaping.
++    std::thread::spawn(move || {
++        if let Some(delay) = delay {
++            std::thread::sleep(delay);
++            if TRIGGER_GENERATION.load(std::sync::atomic::Ordering::SeqCst) != generation {
++                tracing::debug!("trigger superseded by a newer press, skipping: {cmd}");
++                return;
++            }
++        }
++        tracing::info!("trigger: {cmd}");
++        match std::process::Command::new("sh")
++            .arg("-c")
++            .arg(&cmd)
++            .stdin(std::process::Stdio::null())
++            .stdout(std::process::Stdio::null())
++            .stderr(std::process::Stdio::null())
++            .spawn()
++        {
++            Ok(mut child) => {
+                 let _ = child.wait();
+-            });
++            }
++            Err(e) => tracing::warn!("trigger command failed to start: {e}"),
+         }
+-        Err(e) => tracing::warn!("trigger command failed to start: {e}"),
+-    }
++    });
+ }
+ 
+ /// Run the ATVV protocol session.
+@@ -162,7 +179,10 @@ pub async fn run_session(
+         // and on every way out (release, frame timeout, transport error) so a
+         // dictation tool is never left recording.
+         if (previous == State::Streaming) != (s == State::Streaming) {
+-            fire_trigger(trigger_cmd);
++            // Leaving streaming: wait for audio still in the buffers to reach
++            // the consumer before telling it to stop.
++            let delay = (s != State::Streaming).then_some(TRIGGER_STOP_DELAY);
++            fire_trigger(trigger_cmd, delay);
+         }
+         if let Some(tx) = state_tx {
+             if tx.send(s).is_err() {
+diff --git a/src/pw.rs b/src/pw.rs
+index f6168da..3e0b7d3 100644
+--- a/src/pw.rs
++++ b/src/pw.rs
+@@ -162,13 +162,29 @@ fn write_pcm_to_sink(
+     );
+ 
+     let gain_linear = 10f32.powf(gain_db / 20.0);
+-    let silence = vec![0u8; (sample_rate as usize / 1000) * TICK.as_millis() as usize * 2];
+     let mut bytes: Vec<u8> = Vec::with_capacity(8192);
++    // 20 ms of silence, written only to fill a deficit against the clock.
++    let silence = vec![0u8; (sample_rate as usize / 1000) * TICK.as_millis() as usize * 2];
++
++    let started = std::time::Instant::now();
++    let mut written_samples: u64 = 0;
+ 
+     loop {
+         if stop.load(Ordering::Relaxed) {
+             break;
+         }
++
++        // Pace to the wall clock. Writing faster than real time — which the old
++        // unconditional silence ticks did whenever the frame queue happened to
++        // be empty — makes pw-cat queue audio, so the backlog grows through an
++        // utterance and the tail is still in flight when the consumer is told
++        // to stop. Never write ahead of the clock.
++        let due = (started.elapsed().as_secs_f64() * sample_rate as f64) as u64;
++        if written_samples > due {
++            std::thread::sleep(Duration::from_millis(5));
++            continue;
++        }
++
+         match audio_rx.recv_timeout(TICK) {
+             Ok(mut frame) => {
+                 crate::adpcm::apply_gain_linear(&mut frame, gain_linear);
+@@ -180,11 +196,21 @@ fn write_pcm_to_sink(
+                     tracing::warn!("pw-cat write failed: {e}");
+                     break;
+                 }
++                written_samples += (bytes.len() / 2) as u64;
+             }
+             Err(mpsc::RecvTimeoutError::Timeout) => {
+-                if let Err(e) = stdin.write_all(&silence) {
+-                    tracing::warn!("pw-cat write failed: {e}");
+-                    break;
++                // Nothing pending: fill the gap up to the clock so the sink
++                // stays fed, but never beyond it.
++                let mut deficit = (due - written_samples) as usize;
++                let chunk = silence.len() / 2;
++                while deficit > 0 {
++                    let take = deficit.min(chunk);
++                    if let Err(e) = stdin.write_all(&silence[..take * 2]) {
++                        tracing::warn!("pw-cat write failed: {e}");
++                        break;
++                    }
++                    written_samples += take as u64;
++                    deficit -= take;
+                 }
+             }
+             Err(mpsc::RecvTimeoutError::Disconnected) => break,
