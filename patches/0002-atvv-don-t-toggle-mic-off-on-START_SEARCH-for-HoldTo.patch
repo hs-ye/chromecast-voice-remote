@@ -1,0 +1,102 @@
+From b8b69494f148b9f1e5ac4f9d8a1f43f3af0eb000 Mon Sep 17 00:00:00 2001
+From: yehan <yehan@pop-os>
+Date: Thu, 15 Oct 2026 16:34:47 +1100
+Subject: [PATCH 02/10] atvv: don't toggle mic off on START_SEARCH for
+ HoldToTalk remotes
+
+HoldToTalk remotes (e.g. the Chromecast G9N9N voice remote) send
+START_SEARCH immediately after AUDIO_START on a single press. The
+StartSearch handler treated any START_SEARCH while Streaming/Opening as a
+second (toggle-off) press, so it sent MIC_CLOSE ~30 ms after the stream
+opened - the voice button LED flashed and no audio ever reached the
+PipeWire source.
+
+Carry the negotiated InteractionModel through the Protocol trait and only
+apply the toggle-off for non-HTT models; with HTT the remote ends the
+stream itself (AUDIO_STOP / HttButtonRelease). v0.4 keeps the default
+OnRequest, so its toggle behaviour is unchanged.
+---
+ src/atvv.rs         | 27 +++++++++++++++++++++------
+ src/protocol/mod.rs |  7 +++++++
+ src/protocol/v10.rs |  4 ++++
+ 3 files changed, 32 insertions(+), 6 deletions(-)
+
+diff --git a/src/atvv.rs b/src/atvv.rs
+index db48752..da38aa1 100644
+--- a/src/atvv.rs
++++ b/src/atvv.rs
+@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
+ use tokio::time::{self, Instant};
+ 
+ use crate::consumer;
+-use crate::protocol::types::{AudioFrame, AudioStopReason, CtlEvent, StreamId};
++use crate::protocol::types::{AudioFrame, AudioStopReason, CtlEvent, InteractionModel, StreamId};
+ use crate::protocol::Protocol;
+ 
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+@@ -215,12 +215,27 @@ pub async fn run_session(
+                     CtlEvent::StartSearch => {
+                         tracing::info!("START_SEARCH (state={:?})", state);
+ 
++                        // HoldToTalk remotes re-send START_SEARCH right after
++                        // AUDIO_START on a *single* press. Treating that as a
++                        // second (toggle-off) press closed the mic ~30 ms after
++                        // it opened, so the stream never delivered audio. Only
++                        // toggle for non-HTT models; with HTT the remote ends
++                        // the stream itself (AUDIO_STOP / HttButtonRelease).
++                        let hold_to_talk =
++                            protocol.interaction_model() == InteractionModel::HoldToTalk;
++
+                         if state == State::Streaming || state == State::Opening {
+-                            // Toggle: second press stops streaming
+-                            let sid = current_stream_id.unwrap_or(StreamId::MIC_OPEN);
+-                            ble.write_command(&protocol.mic_close_cmd(sid)).await?;
+-                            tracing::info!("Sent MIC_CLOSE (toggle off)");
+-                            close_mic_reset!(state, last_seq, current_stream_id);
++                            if hold_to_talk {
++                                tracing::debug!(
++                                    "START_SEARCH while active (HoldToTalk): keeping mic open"
++                                );
++                            } else {
++                                // Toggle: second press stops streaming
++                                let sid = current_stream_id.unwrap_or(StreamId::MIC_OPEN);
++                                ble.write_command(&protocol.mic_close_cmd(sid)).await?;
++                                tracing::info!("Sent MIC_CLOSE (toggle off)");
++                                close_mic_reset!(state, last_seq, current_stream_id);
++                            }
+                         } else {
+                             ble.write_command(&protocol.mic_open_cmd()).await?;
+                             tracing::info!("Sent MIC_OPEN");
+diff --git a/src/protocol/mod.rs b/src/protocol/mod.rs
+index c40ea3e..68e0279 100644
+--- a/src/protocol/mod.rs
++++ b/src/protocol/mod.rs
+@@ -13,6 +13,13 @@ pub trait Protocol: Send {
+     /// Protocol version this implementation speaks.
+     fn version(&self) -> ProtocolVersion;
+ 
++    /// Interaction model negotiated from CAPS_RESP.
++    ///
++    /// v0.4 has no interaction model, so the default is `OnRequest`.
++    fn interaction_model(&self) -> InteractionModel {
++        InteractionModel::OnRequest
++    }
++
+     /// Build MIC_OPEN command bytes.
+     fn mic_open_cmd(&self) -> Vec<u8>;
+ 
+diff --git a/src/protocol/v10.rs b/src/protocol/v10.rs
+index 0c0d6a4..2f1aad5 100644
+--- a/src/protocol/v10.rs
++++ b/src/protocol/v10.rs
+@@ -71,6 +71,10 @@ impl Protocol for ProtocolV10 {
+         ProtocolVersion::V1_0
+     }
+ 
++    fn interaction_model(&self) -> InteractionModel {
++        self.interaction_model
++    }
++
+     fn mic_open_cmd(&self) -> Vec<u8> {
+         vec![u8::from(TxOpcode::MicOpen), u8::from(AudioMode::Playback)]
+     }

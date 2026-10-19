@@ -1,0 +1,28 @@
+From a96fa3ed50319dca1e16f9d121ad532d65e6a13d Mon Sep 17 00:00:00 2001
+From: hs-ye <ye.hansang@gmail.com>
+Date: Sun, 18 Oct 2026 17:26:07 +1100
+Subject: [PATCH 05/10] Lower default gain to 14 dB: 20 dB clipped the remote's
+ signal
+
+---
+ src/main.rs | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/src/main.rs b/src/main.rs
+index d543407..b4940fe 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -34,8 +34,11 @@ struct Cli {
+     #[arg(short, long)]
+     adapter: Option<String>,
+ 
+-    /// Audio gain in dB (default: 20)
+-    #[arg(short, long, default_value = "20")]
++    /// Audio gain in dB (default: 14)
++    ///
++    /// 20 dB drove the remote's already-hot signal into hard clipping
++    /// (peak 32768, 342 clipped samples in a 1.7 s utterance).
++    #[arg(short, long, default_value = "14")]
+     gain: f32,
+ 
+     /// Close mic after N seconds without audio frames (device asleep). 0 = disabled.

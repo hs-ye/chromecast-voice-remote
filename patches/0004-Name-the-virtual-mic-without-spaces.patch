@@ -1,0 +1,74 @@
+From 686d301bef48d034ef8a45f909a684f0747a0ab0 Mon Sep 17 00:00:00 2001
+From: hs-ye <ye.hansang@gmail.com>
+Date: Sun, 18 Oct 2026 16:55:44 +1100
+Subject: [PATCH 04/10] Name the virtual mic without spaces
+
+pipewire-pulse splits module arguments on whitespace and drops quotes, so
+"Chromecast Remote microphone" reached the server as "Chromecast" and the
+device was indistinguishable from the remote in sound settings. Descriptions
+are now hyphenated ("Chromecast-Remote-mic").
+---
+ src/main.rs |  5 ++++-
+ src/pw.rs   | 20 ++++++++++++++++++--
+ 2 files changed, 22 insertions(+), 3 deletions(-)
+
+diff --git a/src/main.rs b/src/main.rs
+index 6d801ce..d543407 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -307,7 +307,10 @@ async fn main() -> anyhow::Result<()> {
+             if ble_name.is_empty() {
+                 "ATVVoice Microphone".to_string()
+             } else {
+-                ble_name.clone()
++                // Mark it as a microphone, and keep it free of spaces: module
++                // arguments are whitespace-split, so "Chromecast Remote
++                // microphone" would show up in sound settings as "Chromecast".
++                format!("{}-mic", ble_name.replace(' ', "-"))
+             }
+         });
+ 
+diff --git a/src/pw.rs b/src/pw.rs
+index f6168da..f17c145 100644
+--- a/src/pw.rs
++++ b/src/pw.rs
+@@ -82,13 +82,26 @@ fn remove_stale(sink: &str, source: &str) {
+     }
+ }
+ 
++/// Make a value safe for a module argument.
++///
++/// pipewire-pulse splits module arguments on whitespace and drops surrounding
++/// quotes, so a value containing a space is truncated at the first one
++/// ("Chromecast Remote microphone" arrives as "Chromecast"). Hyphens are the
++/// only way to keep the whole value visible.
++fn escape_arg(value: &str) -> String {
++    value.replace(' ', "-")
++}
++
+ /// Create the null sink backing the microphone; returns its module id.
+ fn create_sink(sink: &str, description: &str) -> Option<u32> {
+     let id = pactl(&[
+         "load-module",
+         "module-null-sink",
+         &format!("sink_name={sink}"),
+-        &format!("sink_properties=device.description=\"{description}\""),
++        &format!(
++            "sink_properties=device.description={}",
++            escape_arg(description)
++        ),
+     ])?
+     .parse::<u32>()
+     .ok()?;
+@@ -108,7 +121,10 @@ fn create_remap(source: &str, master: &str, description: &str) -> Option<u32> {
+         "module-remap-source",
+         &format!("master={master}"),
+         &format!("source_name={source}"),
+-        &format!("source_properties=device.description=\"{description}\""),
++        &format!(
++            "source_properties=device.description={}",
++            escape_arg(description)
++        ),
+     ])?
+     .parse::<u32>()
+     .ok()

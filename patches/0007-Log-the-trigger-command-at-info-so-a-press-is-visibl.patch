@@ -1,0 +1,23 @@
+From 40a6345ea9a8db1013adfdddeb16e4edd071ea90 Mon Sep 17 00:00:00 2001
+From: hs-ye <ye.hansang@gmail.com>
+Date: Sun, 18 Oct 2026 18:09:30 +1100
+Subject: [PATCH 07/10] Log the trigger command at info so a press is visible
+ in the journal
+
+---
+ src/atvv.rs | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/atvv.rs b/src/atvv.rs
+index 9e71673..499633e 100644
+--- a/src/atvv.rs
++++ b/src/atvv.rs
+@@ -104,7 +104,7 @@ pub struct SessionConfig<'a> {
+ /// Run the configured trigger command, if any.
+ fn fire_trigger(cmd: Option<&str>) {
+     let Some(cmd) = cmd else { return };
+-    tracing::debug!("trigger: {cmd}");
++    tracing::info!("trigger: {cmd}");
+     match std::process::Command::new("sh")
+         .arg("-c")
+         .arg(cmd)
