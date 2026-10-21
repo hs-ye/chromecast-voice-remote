@@ -1,7 +1,10 @@
-# voice-remote
+# chromecast-voice-remote
 
 Hold the **voice button** on a Chromecast Voice Remote and have the words typed into
 whatever window has focus on Linux — no keyboard, no laptop shortcut.
+
+**Status:** early. ATVVoice is built from a pinned upstream commit plus a patch series;
+see [Upstream staging](#upstream-staging) for what still has to land upstream.
 
 ```
 Chromecast Remote --BLE/ATVV--> atvvoice --PCM--> null sink --> monitor
@@ -33,9 +36,10 @@ to this remote's scancodes.
 bluetoothctl
 > scan on
 # hold Back + Home (or the pairing combo for your remote) until it appears
-> pair 47:54:51:48:DA:A1
-> trust 47:54:51:48:DA:A1
-> connect 47:54:51:48:DA:A1
+> devices                       # note the remote's address
+> pair AA:BB:CC:DD:EE:FF
+> trust AA:BB:CC:DD:EE:FF
+> connect AA:BB:CC:DD:EE:FF
 > quit
 ```
 
@@ -45,8 +49,8 @@ The address is your remote's; the installer auto-detects a device named
 ### 2. Review, then install
 
 ```bash
-git clone <this-repo> ~/GitRepos/voice-remote
-cd ~/GitRepos/voice-remote
+git clone https://github.com/hs-ye/chromecast-voice-remote ~/GitRepos/chromecast-voice-remote
+cd ~/GitRepos/chromecast-voice-remote
 ./install.sh --dry-run              # prints every command, changes nothing
 ./install.sh --install-deps         # apt deps + build + install
 ```
