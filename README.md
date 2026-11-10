@@ -1,5 +1,10 @@
 # chromecast-voice-remote
 
+> **Archived 2026-11-10.** Development moved to
+> [hs-ye/ATVVoice](https://github.com/hs-ye/ATVVoice), which builds and installs everything
+> here from a single clone (`git clone … && ./install.sh`). This repository is kept for
+> history only.
+
 Hold the **voice button** on a Chromecast Voice Remote and have the words typed into
 whatever window has focus on Linux — no keyboard, no laptop shortcut.
 
